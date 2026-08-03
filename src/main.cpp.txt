@@ -1,0 +1,571 @@
+#include "mbed.h"
+
+// Define output and input pins
+// input pins
+DigitalOut led1(PC_0);
+// output pins for the start and off function
+DigitalIn onoffbutton(PC_10);
+DigitalIn emergencybutton(PC_11);
+DigitalIn resetbutton(PD_2);
+
+
+//define output pins for temperature LEDs
+BusOut leds_bus(PC_1, PB_0, PA_4); // LED 2, 3, 4
+
+// Define RGB LED pins
+PwmOut red_LED(PB_3);   // Red
+PwmOut green_LED(PB_5); // Green
+PwmOut blue_LED(PB_4);  // Blue
+//Define buzzer pins
+PwmOut buzzer(PA_15);
+
+
+//define analogue input to read potentiometer voltage for temperature
+AnalogIn pot1(PA_5);
+// Define potentiometer pin for wash cycle selection
+AnalogIn pot2(PA_6);
+// 7-segment Display setup
+BusOut SegDis(PA_11, PA_12, PB_1, PB_15, PB_14, PB_12, PB_11);
+DigitalOut decimal_point(PB_2);
+
+//define analogue input for FSR sensor
+AnalogIn FSR(PA_1);
+
+//define analogue input for LDR sensor
+AnalogIn LDR(PC_2);  
+
+
+//ENHANCMENT
+
+
+//Defining the notes we want the buzzer to play clair de lune for start up
+#define NOTE_C4  262
+#define NOTE_D4  294
+#define NOTE_E4  330
+#define NOTE_F4  349
+#define NOTE_G4  392
+#define NOTE_A4  440
+#define NOTE_B4  494
+#define NOTE_C5  523
+#define NOTE_C4  262
+#define NOTE_D4  294
+#define NOTE_E4  330
+#define NOTE_G4  392
+#define NOTE_D5  587
+#define NOTE_E5  659
+//this is for FSR
+#define MIN_FORCE_LOAD 100.0f  
+#define MAX_FORCE_LOAD 400.0f
+#define WAIT_TIME_MS 100   
+//This is for LDR
+#define DOOR_THRESHOLD 70.0f
+
+
+
+BufferedSerial pc(USBTX, USBRX, 9600);  // Serial communication
+
+
+
+// Hex values to display 0-9, A-F
+int hexDis[] = {0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F, 
+                0x77, 0x7C, 0x39, 0x5E, 0x79, 0x71};
+// PWM frequency
+float frequency = 100; // 100 Hz
+
+// Declare state variables
+int power_on = 0; //machine is off
+int initial_button_state = 1;  // assume unpressed (meaning the machine start as off)
+
+// Temperature states
+enum TempSetting {
+    TEMP_40 = 0,
+    TEMP_50,
+    TEMP_60
+};
+
+//declare variables
+int cntl_val = 0;       // Create & initialise int variable to control to output state of the bus 
+
+// Wash cycle tracking
+int previous_cycle = -1; //since the values for the cycles start from 0, this line of code garaunties that the initial cycle is not valid (doesn't start on a defult cycle)
+TempSetting last_setting = TEMP_40; //initilising the chosen temp
+// Adding this line of code so that when a change happens the message is not printed each time and only once
+TempSetting last_printed_temp = TEMP_40;
+int last_printed_cycle = -1;
+Timer selection_timer;
+bool selection_changed = false;
+// tp avoid multiple selcetions
+
+float last_pot1 = 0.0f;
+float last_pot2 = 0.0f;
+int auto_display_mode = 0; // 0 = temp, 1 = cycle
+Timer auto_mode_timer;
+
+//for checking on the load
+int load_ok = 0; // 0 = false, 1 = true
+int door_closed= 0; // 0 = false, 1 = true
+
+
+
+
+// Function declarations
+void init_buttons();
+void init_leds();
+void init_rgb_leds();
+void update_temperature_led(TempSetting setting);
+const char* get_temp_string(TempSetting setting);
+const char* get_cycle_string(int cycle);
+
+
+//The code needed for the buzzer to play a song when wash is starting, when cycle is 50% and when wash is finished
+void play_note(int frequency, int duration_ms = 500) {
+    buzzer.period_us(1000000 / frequency);          
+    buzzer.pulsewidth_us(500000 / frequency);       // 50% duty cycle
+    ThisThread::sleep_for(500ms);
+    buzzer.pulsewidth_us(0);                        // stop sound
+    ThisThread::sleep_for(50ms);                    // small delay between notes
+}
+
+//to play a version of clair de lune at the start up
+void play_startup_melody() {
+    int melody[] = { NOTE_C4, NOTE_E4, NOTE_G4, NOTE_E4, NOTE_D4, NOTE_E4, NOTE_G4, NOTE_E4 };
+    int duration[]= {500,500,700,500,500,500,700,700};
+    for (int i = 0; i < 8; i++) {
+        play_note(melody[i], duration[i]);
+    }
+    play_note(NOTE_C5, 150); // short beep after melody
+}
+
+void play_shutdown_melody() {
+    int melody[] = { NOTE_C5, NOTE_G4, NOTE_E4, NOTE_C4 };
+    for (int i = 0; i < 4; i++) {
+        play_note(melody[i], 300);
+    }
+}
+
+//this line of code is to create the segment function
+void display_on_segment(int number) {
+    if (number >= 0 && number < 16) {
+        SegDis.write(hexDis[number]);
+    } else {
+        SegDis.write(0x00); // turn off
+    }
+}
+
+//function for when an error happens led1 blinks and the buzzor plays a tone
+void error_led_buzzer() {
+    for (int i = 0; i < 5 ; i++) {
+        led1 = !led1; //blinbking led1 toggles on
+        buzzer.write(0.5);
+        ThisThread::sleep_for(500ms);
+        led1 = !led1; //blinbking led1 toggles off
+        buzzer.write(0.5); //turns buzzer off
+        ThisThread::sleep_for(500ms);
+    }
+}
+
+//this is for the end of cycle
+void playEndMelody() {
+    int melody[] = {NOTE_E5, NOTE_D5, NOTE_C5, NOTE_G4, NOTE_A4, NOTE_F4 };
+    int duration[] = { 400, 400, 600, 400, 400, 600 };
+
+    for (int i = 0; i < 6; i++) {
+        play_note(melody[i], duration[i]);
+    }
+}
+
+//this is for the time out function and reseting
+void wait_for_reset() {
+    printf("Press Reset Button to retry.\n");
+    while (resetbutton.read() == 0) {
+        ThisThread::sleep_for(200ms);
+    }
+    printf("Reset detected. Restarting selection process...\n");
+    ThisThread::sleep_for(300ms);
+}
+
+   
+
+
+int main() {
+    init_buttons();
+    init_leds();
+    init_rgb_leds();
+
+    while (1) {
+        int current_state = onoffbutton.read();
+
+        // check to see if the button has been pressed or not
+        if (initial_button_state == 1 && current_state == 0) {
+           power_on = !power_on;
+           led1.write(power_on);
+           thread_sleep_for(200); // debounce delay
+
+          if (power_on == 1) {
+             play_startup_melody(); //plays when machine is
+             printf("Washing machine is turned on.\n");
+             printf("Please wait...\n");
+             ThisThread::sleep_for(3000ms); // wait 3 seconds
+             //these are to reset the FSR and LDR checks so that the values reset
+             load_ok = 0;      // Force FSR check on new power-on
+             door_closed = 0;  // Force LDR check on new power-on
+             printf("You may now choose your temperature and wash cycle using the potentiometers.\n");
+         } else {
+             play_shutdown_melody(); //plays when the machine in off
+             SegDis.write(0x00); // Turn off the 7-segment display
+             printf("Washing machine is turned off.\n");
+             
+
+        //this line of code is to ensure that by turning the machine off, everything shuts down.
+
+        // Turn off all temperature LEDs
+        leds_bus.write(0);
+
+        // Turn off RGB LED
+        red_LED.write(0);
+        green_LED.write(0);
+        blue_LED.write(0);
+    }
+}
+
+        initial_button_state = current_state;
+
+        if (power_on == 1) {
+            // TEMPERATURE SELECTION
+            cntl_val = pot1.read_u16() / 21845;  // Read potentiometer value (65536)
+            TempSetting current_setting = TEMP_40;
+
+            if (cntl_val == 0) {
+                current_setting = TEMP_40; 
+            } else if (cntl_val == 1) {
+                current_setting = TEMP_50;
+            } else {
+                current_setting = TEMP_60;
+            }
+             
+            if (current_setting != last_setting) {
+                update_temperature_led(current_setting);
+                switch (current_setting) {
+                    case TEMP_40: printf("Temp: 40°C\n"); break;
+                    case TEMP_50: printf("Temp: 50°C\n"); break;
+                    case TEMP_60: printf("Temp: 60°C\n"); break;
+                }
+                //this line is that after a change in the temperatire the segments show it
+                //display_on_segment(cntl_val +to pins 1);
+                last_setting = current_setting;
+                // Start/reset the timer because a selection was made
+                selection_timer.reset();
+                selection_timer.start();
+                selection_changed = true;
+            }
+
+            // CYCLE SELECTION
+            float pot_value = pot2.read(); // value between 0 and 1
+            int cycle = 0;
+
+            if (pot_value < 0.25) {
+                // Delicate --> Blue
+                red_LED.write(0);
+                green_LED.write(0);
+                blue_LED.write(1);
+                cycle = 0;
+            } else if (pot_value < 0.5) {
+                // Cotton --> Green
+                red_LED.write(0);
+                green_LED.write(1);
+                blue_LED.write(0);
+                cycle = 1;
+            } else if (pot_value < 0.75) {
+                // Heavy Duty --> Red
+                red_LED.write(1);
+                green_LED.write(0);
+                blue_LED.write(0);
+                cycle = 2;
+            } else {
+                // Quick Wash --> White
+                red_LED.write(1);
+                green_LED.write(1);
+                blue_LED.write(1);
+                cycle = 3;
+            }
+             // Update 7-segment display during cycle selection
+             //display_on_segment(cycle + 1);  // Displays 1,2,3,4 for the wash cycles
+
+
+            if (cycle != previous_cycle) {
+                switch (cycle) {
+                    case 0: printf("Selected cycle: Delicate\n"); break;
+                    case 1: printf("Selected cycle: Cotton\n"); break;
+                    case 2: printf("Selected cycle: Heavy Duty\n"); break;
+                    case 3: printf("Selected cycle: Quick Wash\n"); break;
+                }
+                previous_cycle = cycle;
+
+                // Start/reset the timer because a selection was made
+                selection_timer.reset();
+                selection_timer.start();
+                selection_changed = true;
+            }
+
+
+            //this is so that after  seconds of no chnages detected the machine will print a message saying what the final selection is
+            if (selection_changed && selection_timer.read() >= 3.0) {
+                printf("\nFinal Selection: %s cycle at %s.\n\n", get_cycle_string(previous_cycle), get_temp_string(last_setting));
+                selection_changed = false;
+                selection_timer.stop();
+
+                
+
+
+            //Chceking for heavy load, low load if this condition is not met
+            //cycle cannot start
+            Timer fsr_timeout;
+            fsr_timeout.start();
+
+            while (!load_ok) {
+                //FSR load check function which prevents wash cycle if load too heavy or too ligth
+            float fsr_value = FSR.read() * 120.0f * 5.0f;
+            printf("Checking load value: %.2f\n", fsr_value);
+
+            
+
+            if (fsr_value < MIN_FORCE_LOAD) {
+                printf("load too low. Cycle cannot start. \n");
+            } else if (fsr_value > MAX_FORCE_LOAD) {
+                printf("load to heavy. cycle cannot start");
+            } else {
+                load_ok = 1;
+            }
+
+            // Timeout check
+    if (fsr_timeout.read() >= 15.0f) {
+        printf("Load check timed out after 15 seconds.\n");
+        wait_for_reset();      // Wait for button press
+        fsr_timeout.reset();   // Reset timer
+    }
+
+
+//this line is that if the load is too light or too heavy the cycle retries 
+             if (!load_ok) {
+        printf("Retrying load check in 3 seconds...\n");
+        ThisThread::sleep_for(3s);
+    } 
+    
+    // Door check function
+    Timer ldr_timeout;
+ldr_timeout.start();
+while (true) {
+    float LDR_Val = LDR.read()*100;  // from 0 to 100 
+    printf("LDR reading (door light level): %.2f\n", LDR_Val);
+
+    if (LDR_Val > DOOR_THRESHOLD) {
+        printf("Door is open! Please close the door to begin the cycle.\n");
+        red_LED.write(1); // light up red LED
+        ThisThread::sleep_for(1000ms);
+    } else {
+        printf("Door is closed. Starting cycle...\n");
+        red_LED.write(0); // turn off red LED
+        break;
+    }
+
+    if (ldr_timeout.read() >= 15.0f) {
+        printf("Door check timed out after 15 seconds.\n");
+        wait_for_reset();     // Wait for the shared button press
+        ldr_timeout.reset();  // Reset timer
+    }
+
+    ThisThread::sleep_for(2s); // Retry every 2 seconds
+}
+
+}
+
+            bool emergency_stop = false;
+            for (int i = 9; i >= 0; --i) {
+                //Check emergency stop
+                if (emergencybutton.read() == 1) {
+                    emergency_stop = true;
+                    break;
+                }
+            
+
+    // Update 7-segment
+    display_on_segment(i);
+    // RGB LED Progress Indicator
+    if (i > 6) {
+        // Beginning
+        red_LED.write(0);
+        green_LED.write(0);
+        blue_LED.write(1); // Blue
+        printf("Washing..\n");
+    } else if (i > 3) {
+        // Midway
+        red_LED.write(0);
+        green_LED.write(1);
+        blue_LED.write(0); // Green
+        printf("rinsing..\n");
+    } else {
+        // Nearing End
+        red_LED.write(1);
+        green_LED.write(1);
+        blue_LED.write(1); // White
+        printf("draining..\n");
+    }
+    //These line are that the multi colored led visiually shows the progress of the cycle
+
+    printf("Washing... %d\n", i);
+    ThisThread::sleep_for(1000ms); // Wait 1 second
+}
+
+// Stop everything and turn off
+buzzer.pulsewidth_us(0);
+display_on_segment(-1);
+red_LED.write(0);
+green_LED.write(0);
+blue_LED.write(0);
+
+if (emergency_stop) {
+    printf("Emergency stop activated!\n");
+
+    // Blink LED1 to indicate emergency
+    for (int j = 0; j < 6; ++j) {
+        leds_bus = !leds_bus;
+        ThisThread::sleep_for(300ms);
+    }
+
+} else {
+    printf("Cycle complete!\n");
+    playEndMelody(); // End-of-wash tune
+    //Reset the stated for next cycle
+    load_ok = 0;
+    door_closed= 0;
+
+    // Turn off system automatically
+power_on = false;
+led1 = 0;
+display_on_segment(-1); // blank display
+red_LED.write(0); // turn off RGB
+green_LED.write(0);
+blue_LED.write(0);
+printf("System shutting down...\n");
+play_shutdown_melody();
+
+//this line is that so after the cycle is done and system is hut down user must turn the system back on manually
+// Wait for user to turn system back on
+printf("Press the power button to restart the system.\n");
+
+// Ensure system stays off
+while (!onoffbutton.read()) {
+    ThisThread::sleep_for(100ms); // wait until button is pressed
+}
+
+// Debounce and wait for release
+while (onoffbutton.read()) {
+    ThisThread::sleep_for(100ms);
+}
+
+power_on = true;
+led1 = 1;
+play_startup_melody();
+
+
+
+}
+            
+            }
+            //These line are added so that whenever a pointmeter is changing the board recognise it and changes the 
+            //segment value that is being displayed accordingly so pot1 --> temp --> display 1 2 3 for temp po2 --> cycle --> displays 1 2 3 4
+            float pot1_val=pot1.read(); //reads the value of pot1
+            float pot2_val=pot2.read(); //reads the value of pot2
+            //next we calculate the differences betwwen the values reading so that we can detect motion whenever the user changes the pointmeter
+            float diff1=fabs(pot1_val - last_pot1);
+            float diff2=fabs(pot2_val - last_pot2);
+            //perevnts noise and such
+            const float threshold = 0.03f;
+            
+            //actual logic is implented here
+        if (diff1 > threshold && diff1 > diff2) { //detects if temperature is changing (pot1)
+            auto_display_mode = 0; // Temperature mode
+            auto_mode_timer.reset();
+            auto_mode_timer.start();
+        } else if (diff2 > threshold && diff2 > diff1) { //detects if pot2 is changing
+            auto_display_mode = 1; // Cycle mode
+            auto_mode_timer.reset();
+            auto_mode_timer.start();
+        }
+
+        if (auto_mode_timer.read() < 2) { //if there is a change in the last 2 seconds the segment toggles
+          if (auto_display_mode == 0) {
+            display_on_segment(cntl_val + 1); // shows temp 1 2 3 
+           } else {
+            display_on_segment(cycle + 1); // shows cycle 1 2 3 4
+           }
+        } else {
+            auto_mode_timer.stop(); // Time's up, stop displaying
+        }
+
+        //updatinh the last values
+        last_pot1 = pot1_val;
+        last_pot2 = pot2_val;
+
+
+
+
+            ThisThread::sleep_for(200ms);
+        }
+    }
+}
+
+void init_buttons() {
+    onoffbutton.mode(PullNone); //turn off internal pull up / pull down resistors
+    emergencybutton.mode(PullNone);
+    resetbutton.mode(PullNone);
+}
+
+void init_leds() {
+    led1.write(0); // Start with LED off
+    leds_bus.write(0); // Turn off all LEDs
+}
+
+void init_rgb_leds() {
+    red_LED.write(0);
+    green_LED.write(0);
+    blue_LED.write(0);
+
+    red_LED.period(1 / frequency);
+    green_LED.period(1 / frequency);
+    blue_LED.period(1 / frequency);
+}
+
+// this is the setting that indicates which led should be on to show what temperature has been chosen visually
+void update_temperature_led(TempSetting setting) {
+    switch (setting) {
+        case TEMP_40:
+            leds_bus.write(1); // LED2 on
+            break;
+        case TEMP_50:
+            leds_bus.write(2); // LED3 on
+            break;
+        case TEMP_60:
+            leds_bus.write(4); // LED4 on
+            break;
+    }
+}
+
+const char* get_temp_string(TempSetting setting) {
+    switch (setting) {
+        case TEMP_40: return "40\u00b0C";
+        case TEMP_50: return "50\u00b0C";
+        case TEMP_60: return "60\u00b0C";
+        default: return "Unknown Temp";
+    }
+}
+
+const char* get_cycle_string(int cycle) {
+    switch (cycle) {
+        case 0: return "Delicate";
+        case 1: return "Cotton";
+        case 2: return "Heavy Duty";
+        case 3: return "Quick Wash";
+        default: return "Unknown Cycle";
+    }
+}
