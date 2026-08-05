@@ -129,7 +129,7 @@ A dedicated emergency stop button immediately terminates the washing cycle and s
 
 ## Project Images
 
-Include:
+Includes:
 
 - Circuit overview
 - Hardware prototype
