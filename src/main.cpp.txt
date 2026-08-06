@@ -47,10 +47,6 @@ AnalogIn LDR(PC_2);
 #define NOTE_A4  440
 #define NOTE_B4  494
 #define NOTE_C5  523
-#define NOTE_C4  262
-#define NOTE_D4  294
-#define NOTE_E4  330
-#define NOTE_G4  392
 #define NOTE_D5  587
 #define NOTE_E5  659
 //this is for FSR
@@ -61,8 +57,6 @@ AnalogIn LDR(PC_2);
 #define DOOR_THRESHOLD 70.0f
 
 
-
-BufferedSerial pc(USBTX, USBRX, 9600);  // Serial communication
 
 
 
@@ -152,17 +146,6 @@ void display_on_segment(int number) {
     }
 }
 
-//function for when an error happens led1 blinks and the buzzor plays a tone
-void error_led_buzzer() {
-    for (int i = 0; i < 5 ; i++) {
-        led1 = !led1; //blinbking led1 toggles on
-        buzzer.write(0.5);
-        ThisThread::sleep_for(500ms);
-        led1 = !led1; //blinbking led1 toggles off
-        buzzer.write(0.5); //turns buzzer off
-        ThisThread::sleep_for(500ms);
-    }
-}
 
 //this is for the end of cycle
 void playEndMelody() {
@@ -199,7 +182,7 @@ int main() {
         if (initial_button_state == 1 && current_state == 0) {
            power_on = !power_on;
            led1.write(power_on);
-           thread_sleep_for(200); // debounce delay
+           ThisThread::sleep_for(200ms); // debounce delay
 
           if (power_on == 1) {
              play_startup_melody(); //plays when machine is
@@ -251,7 +234,6 @@ int main() {
                     case TEMP_60: printf("Temp: 60°C\n"); break;
                 }
                 //this line is that after a change in the temperatire the segments show it
-                //display_on_segment(cntl_val +to pins 1);
                 last_setting = current_setting;
                 // Start/reset the timer because a selection was made
                 selection_timer.reset();
@@ -289,7 +271,7 @@ int main() {
                 cycle = 3;
             }
              // Update 7-segment display during cycle selection
-             //display_on_segment(cycle + 1);  // Displays 1,2,3,4 for the wash cycles
+             // Displays 1,2,3,4 for the wash cycles
 
 
             if (cycle != previous_cycle) {
@@ -308,7 +290,7 @@ int main() {
             }
 
 
-            //this is so that after  seconds of no chnages detected the machine will print a message saying what the final selection is
+            //this is so that after 3 seconds of no chnages detected the machine will print a message saying what the final selection is
             if (selection_changed && selection_timer.read() >= 3.0) {
                 printf("\nFinal Selection: %s cycle at %s.\n\n", get_cycle_string(previous_cycle), get_temp_string(last_setting));
                 selection_changed = false;
